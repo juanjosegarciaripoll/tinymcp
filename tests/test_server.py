@@ -8,8 +8,7 @@ import secrets
 import unittest
 from typing import Any
 
-from tinymcp import AUTH_TIMEOUT, McpServer, serve_tcp
-
+from tinymcp import AUTH_TIMEOUT, McpServer, run_mcp, serve_tcp
 
 # ---------------------------------------------------------------------------
 # McpServer dispatch tests
@@ -70,7 +69,9 @@ class HandleTest(unittest.TestCase):
         self.assertEqual(names, {"echo", "add"})
 
     def test_tools_call_string_result(self) -> None:
-        resp = self._h("tools/call", {"name": "echo", "arguments": {"message": "hi", "count": 3}})
+        resp = self._h(
+            "tools/call", {"name": "echo", "arguments": {"message": "hi", "count": 3}}
+        )
         assert resp is not None
         self.assertEqual(resp["result"]["content"][0]["text"], "hihihi")
         self.assertFalse(resp["result"]["isError"])
@@ -82,7 +83,10 @@ class HandleTest(unittest.TestCase):
         self.assertAlmostEqual(payload["result"], 4.0)
 
     def test_tools_call_exception_returns_is_error(self) -> None:
-        resp = self._h("tools/call", {"name": "echo", "arguments": {"message": "x", "count": "not-an-int"}})
+        resp = self._h(
+            "tools/call",
+            {"name": "echo", "arguments": {"message": "x", "count": "not-an-int"}},
+        )
         assert resp is not None
         self.assertTrue(resp["result"]["isError"])
 
@@ -140,7 +144,9 @@ class ServeLoopTest(unittest.IsolatedAsyncioTestCase):
 
         return s
 
-    async def _run(self, server: McpServer, messages: list[bytes]) -> list[dict[str, Any]]:
+    async def _run(
+        self, server: McpServer, messages: list[bytes]
+    ) -> list[dict[str, Any]]:
         """Feed *messages* into the server, collect all responses, stop on EOF."""
         req: asyncio.Queue[bytes] = asyncio.Queue()
         resp: asyncio.Queue[bytes] = asyncio.Queue()
@@ -159,23 +165,44 @@ class ServeLoopTest(unittest.IsolatedAsyncioTestCase):
         return results
 
     async def test_initialize_response(self) -> None:
-        msg = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                          "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                                     "clientInfo": {"name": "t", "version": "0"}}}).encode() + b"\n"
+        msg = (
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "t", "version": "0"},
+                    },
+                }
+            ).encode()
+            + b"\n"
+        )
         results = await self._run(self._server(), [msg])
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["id"], 1)
 
     async def test_malformed_json_skipped(self) -> None:
         bad = b"not json\n"
-        good = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}).encode() + b"\n"
+        good = (
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}).encode() + b"\n"
+        )
         results = await self._run(self._server(), [bad, good])
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["id"], 2)
 
     async def test_notification_produces_no_response(self) -> None:
-        notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode() + b"\n"
-        ping = json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}).encode() + b"\n"
+        notif = (
+            json.dumps(
+                {"jsonrpc": "2.0", "method": "notifications/initialized"}
+            ).encode()
+            + b"\n"
+        )
+        ping = (
+            json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}).encode() + b"\n"
+        )
         results = await self._run(self._server(), [notif, ping])
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["id"], 3)
@@ -310,3 +337,82 @@ class TcpAuthTest(unittest.IsolatedAsyncioTestCase):
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# run_mcp tests
+# ---------------------------------------------------------------------------
+
+
+class RunMcpTest(unittest.IsolatedAsyncioTestCase):
+    def _server(self) -> McpServer:
+        s = McpServer("run-mcp-test")
+
+        @s.tool()
+        def ping_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+            """Ping."""
+            return "pong"
+
+        return s
+
+    async def test_no_remote_goes_standalone(self) -> None:
+        """With no remote port/token, run_mcp calls run_stdio_standalone."""
+        from unittest.mock import AsyncMock, patch
+
+        standalone = AsyncMock()
+        with patch("tinymcp.transport.run_stdio_standalone", standalone):
+            await run_mcp(self._server())
+        standalone.assert_awaited_once()
+
+    async def test_unreachable_port_calls_on_unreachable_and_standalone(self) -> None:
+        """Unreachable remote triggers on_unreachable then falls back to standalone."""
+        from unittest.mock import AsyncMock, patch
+
+        cleanup_called = False
+
+        def cleanup() -> None:
+            nonlocal cleanup_called
+            cleanup_called = True
+
+        standalone = AsyncMock()
+        with patch("tinymcp.transport.run_stdio_standalone", standalone):
+            await run_mcp(
+                self._server(),
+                remote_port=19998,
+                remote_token="unused",
+                on_unreachable=cleanup,
+            )
+        self.assertTrue(cleanup_called)
+        standalone.assert_awaited_once()
+
+    async def test_reachable_port_calls_bridge(self) -> None:
+        """A live TCP server causes run_mcp to bridge instead of going standalone."""
+        server = _make_server()
+        port_holder: list[int] = []
+        token = secrets.token_hex(16)
+        tcp_task = asyncio.create_task(
+            serve_tcp(server, port=0, token=token, on_bound=port_holder.append)
+        )
+        for _ in range(40):
+            if port_holder:
+                break
+            await asyncio.sleep(0.025)
+        self.assertTrue(port_holder, "TCP server did not bind")
+
+        from unittest.mock import AsyncMock, patch
+
+        bridge = AsyncMock()
+        try:
+            with patch("tinymcp.transport.run_stdio_bridge", bridge):
+                await run_mcp(
+                    self._server(),
+                    remote_port=port_holder[0],
+                    remote_token=token,
+                )
+            bridge.assert_awaited_once()
+            _, kwargs = bridge.call_args
+            self.assertEqual(kwargs["port"], port_holder[0])
+            self.assertEqual(kwargs["token"], token)
+        finally:
+            tcp_task.cancel()
+            await asyncio.gather(tcp_task, return_exceptions=True)

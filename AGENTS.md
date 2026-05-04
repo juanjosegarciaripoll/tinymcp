@@ -40,6 +40,17 @@ All must pass before committing.
 - `serve_tcp` calls `on_bound(actual_port)` exactly once, after the socket is bound but before `serve_forever()`. Consumers rely on this to write their state files.
 - `AUTH_TIMEOUT` and `CONNECT_TIMEOUT` are public constants; consumers import them directly. Do not rename.
 
+## `run_mcp` is the primary entry point
+
+`run_mcp` owns the probe-and-decide logic shared by all consumers: probe
+`remote_port`, bridge if reachable, fall back to standalone if not, call
+`on_unreachable` on stale state.  Consumers read their own project-specific
+state files and pass `(remote_port, remote_token)` in; they do not re-implement
+the probe loop themselves.
+
+Tests for `run_mcp` live in `RunMcpTest` in `tests/test_server.py`.  Consumer
+tests (Chronos, Pony) only test the integration with their own state files.
+
 ## Adding a new MCP method
 
 1. Add a branch to `McpServer._handle` in `server.py`.

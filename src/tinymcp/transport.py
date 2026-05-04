@@ -1,11 +1,16 @@
 """MCP transport helpers: TCP server, stdio bridge, stdio standalone.
 
-Three async entry points:
+Four async entry points:
 
 ``serve_tcp(server, *, host, port, token, on_bound)``
     Accepts MCP connections on *host*:*port*.  Each client must send a JSON
     auth frame ``{"auth": "<token>"}\\n`` as its first line; connections with
     the wrong token or that time out are closed silently.
+
+``run_mcp(server, *, remote_port, remote_token, on_unreachable)``
+    High-level entry point: probe *remote_port*, bridge if reachable, fall
+    back to standalone if not.  Callers read their own state files and pass
+    the discovered port + token; tinymcp owns the probe-and-decide logic.
 
 ``run_stdio_bridge(*, host, port, token)``
     Connects to a running TCP server and forwards stdin/stdout to it.
@@ -107,6 +112,42 @@ async def run_stdio_bridge(*, host: str = "127.0.0.1", port: int, token: str) ->
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def run_mcp(
+    server: McpServer,
+    *,
+    remote_port: int | None = None,
+    remote_token: str | None = None,
+    on_unreachable: Callable[[], None] | None = None,
+) -> None:
+    """Run a full MCP session over stdin/stdout.
+
+    If *remote_port* and *remote_token* are both given, probes the port.
+    On success bridges stdin/stdout to the running TCP server.  If the port
+    is not reachable, calls *on_unreachable* (if provided — e.g. to remove a
+    stale state file) then falls back to a self-contained stdio session.
+
+    This is the standard entry point for a ``mcp`` subcommand that supports
+    both direct use and TUI bridge mode.  Callers read their own project-
+    specific state files and pass the discovered port + token; this function
+    owns the probe-and-decide logic shared by all consumers.
+    """
+    if remote_port is not None and remote_token is not None:
+        try:
+            _r, _w = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", remote_port),
+                timeout=CONNECT_TIMEOUT,
+            )
+            _w.close()
+            await run_stdio_bridge(
+                host="127.0.0.1", port=remote_port, token=remote_token
+            )
+            return
+        except (TimeoutError, ConnectionRefusedError, OSError):
+            if on_unreachable is not None:
+                on_unreachable()
+    await run_stdio_standalone(server)
+
+
 async def run_stdio_standalone(server: McpServer) -> None:
     """Run an MCP session directly over stdin/stdout."""
     await server._run_stdio()  # pyright: ignore[reportPrivateUsage]
@@ -145,6 +186,7 @@ async def _serve_connection(
 __all__ = [
     "AUTH_TIMEOUT",
     "CONNECT_TIMEOUT",
+    "run_mcp",
     "run_stdio_bridge",
     "run_stdio_standalone",
     "serve_tcp",

@@ -52,7 +52,10 @@ Tool functions may return:
 
 ## TCP bridge mode
 
-For long-running processes (e.g. a TUI) that want to expose MCP to a separate `mcp` subprocess without a second SQLite opener:
+Long-running processes (TUI, daemon) can start a local TCP server so that the
+`mcp` subcommand bridges to it, avoiding a competing SQLite opener:
+
+**Long-running process (TUI side):**
 
 ```python
 import asyncio, secrets
@@ -61,22 +64,33 @@ from tinymcp import serve_tcp
 token = secrets.token_hex(32)
 port_holder: list[int] = []
 
-async def main():
-    mcp = build_mcp_server()   # your McpServer
-
-    asyncio.create_task(
-        serve_tcp(mcp, port=0, token=token, on_bound=port_holder.append)
-    )
-    # wait until port_holder[0] is set, write (port, token) to a state file,
-    # then run the TUI.  The `mcp` subcommand reads the state file and calls
-    # run_stdio_bridge() to proxy stdin/stdout to the TCP server.
+asyncio.create_task(
+    serve_tcp(mcp, port=0, token=token, on_bound=port_holder.append)
+)
+# once port_holder[0] is set, write {"port": port_holder[0], "token": token}
+# to a state file so the mcp subcommand can discover it
 ```
+
+**`mcp` subcommand (stdio side):**
 
 ```python
-from tinymcp import run_stdio_bridge
+import asyncio
+from tinymcp import McpServer, run_mcp
 
-await run_stdio_bridge(host="127.0.0.1", port=state.port, token=state.token)
+state = read_state_file()   # your project reads its own state file
+mcp = build_mcp_server()    # your McpServer with tools registered
+
+asyncio.run(run_mcp(
+    mcp,
+    remote_port=state.port if state else None,
+    remote_token=state.token if state else None,
+    on_unreachable=delete_state_file,   # clean up stale state
+))
 ```
+
+`run_mcp` probes the port, bridges to it if reachable, and falls back to a
+self-contained stdio session if not.  The state file format is project-specific;
+tinymcp only needs the `(port, token)` pair.
 
 ## API
 
@@ -91,16 +105,17 @@ Supported type hints for schema generation: `str`, `bytes`, `int`, `bool`, `floa
 
 ### Transport helpers
 
-| Function | Description |
-|----------|-------------|
-| `serve_tcp(server, *, host, port, token, on_bound=None)` | Bind a TCP server; accept authenticated MCP connections. Runs until cancelled. `on_bound(actual_port)` is called once the socket is bound. |
-| `run_stdio_bridge(*, host, port, token)` | Connect to a running TCP server and forward stdin/stdout. |
-| `run_stdio_standalone(server)` | Run a full MCP session directly over stdin/stdout. |
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `run_mcp` | `(server, *, remote_port=None, remote_token=None, on_unreachable=None)` | Standard `mcp` subcommand entry point. Probes the port; bridges if reachable, falls back to standalone if not. Calls `on_unreachable()` on failed probe. |
+| `serve_tcp` | `(server, *, host, port, token, on_bound=None)` | Bind a TCP server; accept authenticated MCP connections. Runs until cancelled. `on_bound(actual_port)` fires once the socket is bound. |
+| `run_stdio_bridge` | `(*, host, port, token)` | Connect to a running TCP server and forward stdin/stdout. |
+| `run_stdio_standalone` | `(server)` | Run a full MCP session directly over stdin/stdout. |
 
 ### Constants
 
 - `AUTH_TIMEOUT = 2.0` — seconds before unauthenticated connections are dropped
-- `CONNECT_TIMEOUT = 0.5` — seconds before `run_stdio_bridge` gives up connecting
+- `CONNECT_TIMEOUT = 0.5` — seconds used by `run_mcp` and `run_stdio_bridge` when probing/connecting
 
 ## Wire format
 
