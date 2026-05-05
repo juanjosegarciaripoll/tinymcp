@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 from collections.abc import Callable
 
@@ -34,12 +35,15 @@ from tinymcp.server import McpServer
 
 AUTH_TIMEOUT: float = 2.0
 CONNECT_TIMEOUT: float = 0.5
+LOOPBACK_HOST: str = "127.0.0.1"
+
+logger = logging.getLogger(__name__)
 
 
 async def serve_tcp(
     server: McpServer,
     *,
-    host: str = "127.0.0.1",
+    host: str = LOOPBACK_HOST,
     port: int = 0,
     token: str,
     on_bound: Callable[[int], None] | None = None,
@@ -56,9 +60,10 @@ async def serve_tcp(
         try:
             await _serve_connection(reader, writer, server, token)
         except Exception:  # noqa: BLE001 — per-connection errors must not kill the server
-            pass
+            logger.exception("unhandled error in connection handler")
         finally:
             writer.close()
+            await writer.wait_closed()
 
     tcp_server = await asyncio.start_server(_handle, host, port)
     actual_port: int = tcp_server.sockets[0].getsockname()[1]
@@ -68,7 +73,7 @@ async def serve_tcp(
         await tcp_server.serve_forever()
 
 
-async def run_stdio_bridge(*, host: str = "127.0.0.1", port: int, token: str) -> None:
+async def run_stdio_bridge(*, host: str = LOOPBACK_HOST, port: int, token: str) -> None:
     """Forward stdin/stdout to the running TCP server.
 
     Sends the auth frame first, then pumps bytes in both directions
@@ -91,6 +96,7 @@ async def run_stdio_bridge(*, host: str = "127.0.0.1", port: int, token: str) ->
             writer.write(line)
             await writer.drain()
         writer.close()
+        await writer.wait_closed()
 
     async def tcp_to_stdout() -> None:
         while True:
@@ -134,12 +140,13 @@ async def run_mcp(
     if remote_port is not None and remote_token is not None:
         try:
             _r, _w = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", remote_port),
+                asyncio.open_connection(LOOPBACK_HOST, remote_port),
                 timeout=CONNECT_TIMEOUT,
             )
             _w.close()
+            await _w.wait_closed()
             await run_stdio_bridge(
-                host="127.0.0.1", port=remote_port, token=remote_token
+                host=LOOPBACK_HOST, port=remote_port, token=remote_token
             )
             return
         except (TimeoutError, ConnectionRefusedError, OSError):
@@ -166,11 +173,16 @@ async def _serve_connection(
 ) -> None:
     """Authenticate one TCP connection then run an MCP session on it."""
     try:
-        raw = await asyncio.wait_for(reader.readline(), timeout=AUTH_TIMEOUT)
+        raw = await asyncio.wait_for(reader.readuntil(b"\n"), timeout=AUTH_TIMEOUT)
         auth = json.loads(raw)
         if auth.get("auth") != token:
             return
-    except (TimeoutError, json.JSONDecodeError, AttributeError):
+    except (  # noqa: PERF203
+        TimeoutError,
+        json.JSONDecodeError,
+        AttributeError,
+        asyncio.LimitOverrunError,
+    ):
         return
 
     async def readline() -> bytes:
@@ -186,6 +198,7 @@ async def _serve_connection(
 __all__ = [
     "AUTH_TIMEOUT",
     "CONNECT_TIMEOUT",
+    "LOOPBACK_HOST",
     "run_mcp",
     "run_stdio_bridge",
     "run_stdio_standalone",

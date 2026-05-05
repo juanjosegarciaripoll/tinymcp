@@ -53,7 +53,7 @@ Tool functions may return:
 ## TCP bridge mode
 
 Long-running processes (TUI, daemon) can start a local TCP server so that the
-`mcp` subcommand bridges to it, avoiding a competing SQLite opener:
+`mcp` subcommand bridges to it instead of starting its own MCP session:
 
 **Long-running process (TUI side):**
 
@@ -88,9 +88,15 @@ asyncio.run(run_mcp(
 ))
 ```
 
-`run_mcp` probes the port, bridges to it if reachable, and falls back to a
-self-contained stdio session if not.  The state file format is project-specific;
-tinymcp only needs the `(port, token)` pair.
+`run_mcp` decision matrix:
+
+| `remote_port` / `remote_token` | Port reachable? | Behaviour |
+|---|---|---|
+| Both provided | Yes | Bridge stdin/stdout to the TCP server |
+| Both provided | No | Call `on_unreachable()` (if given), then run standalone |
+| Either is `None` | — | Run standalone; `on_unreachable` is **not** called |
+
+The state file format is project-specific; tinymcp only needs the `(port, token)` pair.
 
 ## API
 
@@ -98,16 +104,16 @@ tinymcp only needs the `(port, token)` pair.
 
 | Method | Description |
 |--------|-------------|
-| `tool()` | Decorator — registers a callable as an MCP tool. Infers the JSON Schema from Python type hints. |
+| `tool(*, name=None, description=None, schema=None)` | Decorator — registers a callable as an MCP tool. Infers the JSON Schema from Python type hints. Optional kwargs override the auto-derived `name`, `description`, or the entire `schema` dict. |
 | `run()` | Blocking stdio entry point (`asyncio.run` inside). |
 
-Supported type hints for schema generation: `str`, `bytes`, `int`, `bool`, `float`, `None`, `list`, `dict`, `X \| None` / `Optional[X]`. Unknown hints fall back to `{"type": "string"}`.
+Supported type hints for schema generation: `str`, `int`, `bool`, `float`, `None`, `list`, `list[T]`, `dict`, `dict[str, T]`, `X | Y`, `X | None` / `Optional[X]`, `Literal[...]`. Unknown hints fall back to `{"type": "string"}`.
 
 ### Transport helpers
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `run_mcp` | `(server, *, remote_port=None, remote_token=None, on_unreachable=None)` | Standard `mcp` subcommand entry point. Probes the port; bridges if reachable, falls back to standalone if not. Calls `on_unreachable()` on failed probe. |
+| `run_mcp` | `(server, *, remote_port=None, remote_token=None, on_unreachable=None)` | Standard `mcp` subcommand entry point. See decision matrix above. |
 | `serve_tcp` | `(server, *, host, port, token, on_bound=None)` | Bind a TCP server; accept authenticated MCP connections. Runs until cancelled. `on_bound(actual_port)` fires once the socket is bound. |
 | `run_stdio_bridge` | `(*, host, port, token)` | Connect to a running TCP server and forward stdin/stdout. |
 | `run_stdio_standalone` | `(server)` | Run a full MCP session directly over stdin/stdout. |
@@ -116,6 +122,7 @@ Supported type hints for schema generation: `str`, `bytes`, `int`, `bool`, `floa
 
 - `AUTH_TIMEOUT = 2.0` — seconds before unauthenticated connections are dropped
 - `CONNECT_TIMEOUT = 0.5` — seconds used by `run_mcp` and `run_stdio_bridge` when probing/connecting
+- `LOOPBACK_HOST = "127.0.0.1"` — default host for TCP operations
 
 ## Wire format
 
@@ -133,4 +140,4 @@ Connections that send the wrong token or time out during auth are closed silentl
 
 `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `prompts/list`, `resources/templates/list`.
 
-Notifications (`notifications/initialized`, `notifications/cancelled`, `notifications/progress`) are accepted and silently discarded. Unknown methods with an `id` field receive a `-32601 Method not found` error; unknown notifications receive no response.
+Notifications (`notifications/initialized`, `notifications/cancelled`, `notifications/progress`) are accepted and silently discarded. Any message without an `id` field is treated as a notification (no response). Unknown methods with an `id` field receive a `-32601 Method not found` error.
