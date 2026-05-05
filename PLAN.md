@@ -211,17 +211,17 @@ Each item below has a matching section in `UPGRADE.md`. Land at most one
 breaking change per release; bump the package minor version each time and
 publish UPGRADE.md notes.
 
-- [ ] **6.1** Replace `serve_tcp(..., on_bound=callback)` with
+- [x] **6.1** Replace `serve_tcp(..., on_bound=callback)` with
       `serve_tcp(...)` returning `(actual_port, server_task)` (or expose
       a `started: asyncio.Event` + `port` attribute). Removes the
       callback shape. **UPGRADE.md §1.**
 
-- [ ] **6.2** Add `version: str` parameter to `McpServer.__init__` —
+- [x] **6.2** Add `version: str` parameter to `McpServer.__init__` —
       *strictly additive*; not a break in itself, but lands here together
       with 6.1 if you want both in one minor bump. Skip from this phase
       if 5.3 (read from package metadata) is enough. **UPGRADE.md §2 (informational).**
 
-- [ ] **6.3** Add `McpServer.run(*, transport=..., stdin=..., stdout=...)`
+- [x] **6.3** Add `McpServer.run(*, transport=..., stdin=..., stdout=...)`
       so callers can plug in custom streams. Today `McpServer.run()`
       takes no arguments and is hard-wired to `sys.stdin` / `sys.stdout`.
       Existing zero-arg callers stay valid (defaults match today's
@@ -229,7 +229,7 @@ publish UPGRADE.md notes.
       kwargs covered by tests as part of the same release; otherwise keep
       it in Phase 5 as additive.
 
-- [ ] **6.4** Switch tool-exception convention from
+- [x] **6.4** Switch tool-exception convention from
       `{"isError": true, "content": [...]}` to JSON-RPC
       `error: {"code": -32000, ...}`. Wire-format break that touches both
       consumers. **UPGRADE.md §3.** Recommend deferring unless there's a

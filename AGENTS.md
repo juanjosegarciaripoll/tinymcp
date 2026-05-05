@@ -19,10 +19,10 @@ uv run ruff check src/ tests/
 uv run ruff format --check src/ tests/
 uv run mypy --strict src/
 uv run basedpyright src/
-uv run python -m pytest tests/
+uv run python -m pytest tests/ --cov=tinymcp --cov-fail-under=85
 ```
 
-All must pass before committing.
+All must pass before committing. Gates in order: (1) ruff lint + format, (2) mypy and basedpyright both clean, (3) all tests pass with coverage ≥ 85%.
 
 ## Rules
 
@@ -37,7 +37,7 @@ All must pass before committing.
 ## Key invariants
 
 - `_EMPTY_LIST_RESPONSES` maps each empty-list method to its correct JSON key (`resources`, `prompts`, `resourceTemplates`). Do not use `method.split("/")[0] + "s"` — that produces wrong keys.
-- `serve_tcp` calls `on_bound(actual_port)` exactly once, after the socket is bound but before `serve_forever()`. Consumers rely on this to write their state files.
+- `serve_tcp` returns `(actual_port, task)` immediately after the socket is bound. Consumers use the returned port to write their state files; cancel `task` to stop the server.
 - `AUTH_TIMEOUT` and `CONNECT_TIMEOUT` are public constants; consumers import them directly. Do not rename.
 
 ## `run_mcp` is the primary entry point

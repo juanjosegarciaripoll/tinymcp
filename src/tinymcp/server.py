@@ -34,7 +34,7 @@ import types as _types
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypeVar, cast
+from typing import IO, Any, BinaryIO, TypeVar, cast
 
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -46,6 +46,7 @@ _EMPTY_LIST_RESPONSES: dict[str, str] = {
 }
 
 logger = logging.getLogger(__name__)
+
 
 def _get_server_version() -> str:
     try:
@@ -155,8 +156,9 @@ def _build_input_schema(fn: Callable[..., Any]) -> dict[str, Any]:
 class McpServer:
     """Minimal MCP server: register tools, serve over stdio or a stream pair."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, version: str | None = None) -> None:
         self._name = name
+        self._version = version
         self._tools: list[_Tool] = []
 
     def tool(
@@ -210,7 +212,12 @@ class McpServer:
                 {
                     "protocolVersion": _MCP_PROTOCOL_VERSION,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": self._name, "version": _SERVER_VERSION},
+                    "serverInfo": {
+                        "name": self._name,
+                        "version": self._version
+                        if self._version is not None
+                        else _SERVER_VERSION,
+                    },
                 },
             )
 
@@ -250,13 +257,7 @@ class McpServer:
                     {"content": [{"type": "text", "text": text}], "isError": False},
                 )
             except Exception as exc:
-                return _ok(
-                    msg_id,
-                    {
-                        "content": [{"type": "text", "text": str(exc)}],
-                        "isError": True,
-                    },
-                )
+                return _err(msg_id, -32000, str(exc))
 
         if method in _EMPTY_LIST_RESPONSES:
             return _ok(msg_id, {_EMPTY_LIST_RESPONSES[method]: []})
@@ -294,14 +295,28 @@ class McpServer:
                 line = json.dumps(response, separators=(",", ":")).encode() + b"\n"
                 await writeline(line)
 
-    def run(self) -> None:
-        """Run the MCP server over stdin/stdout (blocking)."""
-        asyncio.run(self._run_stdio())
+    def run(
+        self,
+        *,
+        stdin: BinaryIO | None = None,
+        stdout: BinaryIO | None = None,
+    ) -> None:
+        """Run the MCP server over stdin/stdout (blocking).
 
-    async def _run_stdio(self) -> None:
+        *stdin* and *stdout* default to ``sys.stdin.buffer`` and
+        ``sys.stdout.buffer`` when omitted.
+        """
+        asyncio.run(self._run_stdio(stdin=stdin, stdout=stdout))
+
+    async def _run_stdio(
+        self,
+        *,
+        stdin: BinaryIO | None = None,
+        stdout: BinaryIO | None = None,
+    ) -> None:
         loop = asyncio.get_running_loop()
-        stdin_buf = sys.stdin.buffer
-        stdout_buf = sys.stdout.buffer
+        stdin_buf: IO[bytes] = stdin if stdin is not None else sys.stdin.buffer
+        stdout_buf: IO[bytes] = stdout if stdout is not None else sys.stdout.buffer
 
         async def readline() -> bytes:
             return await loop.run_in_executor(None, stdin_buf.readline)

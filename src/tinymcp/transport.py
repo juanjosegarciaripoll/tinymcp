@@ -2,10 +2,11 @@
 
 Four async entry points:
 
-``serve_tcp(server, *, host, port, token, on_bound)``
+``serve_tcp(server, *, host, port, token)``
     Accepts MCP connections on *host*:*port*.  Each client must send a JSON
     auth frame ``{"auth": "<token>"}\\n`` as its first line; connections with
-    the wrong token or that time out are closed silently.
+    the wrong token or that time out are closed silently.  Returns
+    ``(actual_port, task)``; cancel *task* to stop accepting.
 
 ``run_mcp(server, *, remote_port, remote_token, on_unreachable)``
     High-level entry point: probe *remote_port*, bridge if reachable, fall
@@ -46,12 +47,12 @@ async def serve_tcp(
     host: str = LOOPBACK_HOST,
     port: int = 0,
     token: str,
-    on_bound: Callable[[int], None] | None = None,
-) -> None:
-    """Accept MCP connections on *host*:*port* until cancelled.
+) -> tuple[int, asyncio.Task[None]]:
+    """Bind a TCP MCP server on *host*:*port*.
 
-    If *on_bound* is provided it is called with the actual bound port
-    (useful when *port*=0 and the OS assigns an ephemeral port).
+    Returns ``(actual_port, task)`` immediately after the socket is bound.
+    The server is already accepting connections; cancel *task* to stop it
+    and close the socket.
     """
 
     async def _handle(
@@ -67,10 +68,12 @@ async def serve_tcp(
 
     tcp_server = await asyncio.start_server(_handle, host, port)
     actual_port: int = tcp_server.sockets[0].getsockname()[1]
-    if on_bound is not None:
-        on_bound(actual_port)
-    async with tcp_server:
-        await tcp_server.serve_forever()
+
+    async def _serve_forever() -> None:
+        async with tcp_server:
+            await tcp_server.serve_forever()
+
+    return actual_port, asyncio.create_task(_serve_forever())
 
 
 async def run_stdio_bridge(*, host: str = LOOPBACK_HOST, port: int, token: str) -> None:

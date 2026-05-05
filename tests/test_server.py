@@ -62,6 +62,24 @@ class HandleTest(unittest.TestCase):
         self.assertEqual(resp["result"]["serverInfo"]["name"], "test")
         self.assertIsInstance(resp["result"]["serverInfo"]["version"], str)
 
+    def test_initialize_explicit_version(self) -> None:
+        """6.2: explicit version= overrides the package-metadata fallback."""
+        server = McpServer("versioned", version="2.3.4")
+        resp = server._handle(  # pyright: ignore[reportPrivateUsage]
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "0"},
+                },
+            }
+        )
+        assert resp is not None
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "2.3.4")
+
     def test_ping(self) -> None:
         resp = self._h("ping")
         assert resp is not None
@@ -87,28 +105,29 @@ class HandleTest(unittest.TestCase):
         payload = json.loads(resp["result"]["content"][0]["text"])
         self.assertAlmostEqual(payload["result"], 4.0)
 
-    def test_tools_call_exception_returns_is_error(self) -> None:
+    def test_tools_call_exception_returns_rpc_error(self) -> None:
         resp = self._h(
             "tools/call",
             {"name": "echo", "arguments": {"message": "x", "count": "not-an-int"}},
         )
         assert resp is not None
-        self.assertTrue(resp["result"]["isError"])
+        self.assertIn("error", resp)
+        self.assertEqual(resp["error"]["code"], -32000)
 
-    def test_tools_call_exception_text_is_str_exc(self) -> None:
+    def test_tools_call_exception_message_is_str_exc(self) -> None:
         resp = self._h(
             "tools/call",
             {"name": "echo", "arguments": {"message": "x", "count": "not-an-int"}},
         )
         assert resp is not None
-        # The text must be str(exc) — some non-empty string
-        self.assertIsInstance(resp["result"]["content"][0]["text"], str)
-        self.assertTrue(resp["result"]["content"][0]["text"])
+        self.assertIsInstance(resp["error"]["message"], str)
+        self.assertTrue(resp["error"]["message"])
 
-    def test_tools_call_missing_required_arg_returns_is_error(self) -> None:
+    def test_tools_call_missing_required_arg_returns_rpc_error(self) -> None:
         resp = self._h("tools/call", {"name": "echo", "arguments": {"message": "hi"}})
         assert resp is not None
-        self.assertTrue(resp["result"]["isError"])
+        self.assertIn("error", resp)
+        self.assertEqual(resp["error"]["code"], -32000)
 
     def test_tools_call_unknown_tool(self) -> None:
         resp = self._h("tools/call", {"name": "no_such_tool", "arguments": {}})
@@ -515,11 +534,27 @@ class BuildInputSchemaTest(unittest.TestCase):
 
 class StdioAdapterTest(unittest.IsolatedAsyncioTestCase):
     async def test_run_stdio_ping_round_trip(self) -> None:
-        """_run_stdio reads from stdin.buffer and writes to stdout.buffer."""
+        """_run_stdio accepts explicit stream args (6.3)."""
         server = McpServer("stdio-test")
 
         ping_msg = (
             json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n"
+        )
+        fake_stdin = io.BytesIO(ping_msg)
+        fake_stdout = io.BytesIO()
+
+        await server._run_stdio(stdin=fake_stdin, stdout=fake_stdout)  # pyright: ignore[reportPrivateUsage]
+
+        line = fake_stdout.getvalue().rstrip(b"\n")
+        resp = json.loads(line)
+        self.assertEqual(resp["id"], 1)
+        self.assertEqual(resp["result"], {})
+
+    async def test_run_stdio_defaults_to_sys_streams(self) -> None:
+        """_run_stdio uses sys.stdin.buffer / sys.stdout.buffer when no args given."""
+        server = McpServer("stdio-test")
+        ping_msg = (
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}).encode() + b"\n"
         )
         fake_stdin = io.BytesIO(ping_msg)
         fake_stdout = io.BytesIO()
@@ -532,9 +567,8 @@ class StdioAdapterTest(unittest.IsolatedAsyncioTestCase):
             mock_stdout.buffer = fake_stdout
             await server._run_stdio()  # pyright: ignore[reportPrivateUsage]
 
-        line = fake_stdout.getvalue().rstrip(b"\n")
-        resp = json.loads(line)
-        self.assertEqual(resp["id"], 1)
+        resp = json.loads(fake_stdout.getvalue().rstrip(b"\n"))
+        self.assertEqual(resp["id"], 2)
         self.assertEqual(resp["result"], {})
 
 
@@ -555,22 +589,10 @@ def _make_server() -> McpServer:
 
 
 class TcpAuthTest(unittest.IsolatedAsyncioTestCase):
-    async def _start(self, server: McpServer) -> tuple[asyncio.Task[None], int]:
+    async def _start(self, server: McpServer) -> tuple[asyncio.Task[None], int, str]:
         token = secrets.token_hex(16)
-        port_holder: list[int] = []
-
-        def on_bound(p: int) -> None:
-            port_holder.append(p)
-
-        task = asyncio.create_task(
-            serve_tcp(server, port=0, token=token, on_bound=on_bound)
-        )
-        for _ in range(40):
-            if port_holder:
-                break
-            await asyncio.sleep(0.025)
-        self.assertTrue(port_holder, "server did not bind in time")
-        return task, port_holder[0], token  # type: ignore[return-value]
+        port, task = await serve_tcp(server, port=0, token=token)
+        return task, port, token
 
     async def test_wrong_token_closes_connection(self) -> None:
         server = _make_server()
@@ -635,16 +657,8 @@ class TcpAuthTest(unittest.IsolatedAsyncioTestCase):
 class TcpAuthEdgeCaseTest(unittest.IsolatedAsyncioTestCase):
     async def _start(self, server: McpServer) -> tuple[asyncio.Task[None], int, str]:
         token = secrets.token_hex(16)
-        port_holder: list[int] = []
-        task = asyncio.create_task(
-            serve_tcp(server, port=0, token=token, on_bound=port_holder.append)
-        )
-        for _ in range(40):
-            if port_holder:
-                break
-            await asyncio.sleep(0.025)
-        self.assertTrue(port_holder)
-        return task, port_holder[0], token
+        port, task = await serve_tcp(server, port=0, token=token)
+        return task, port, token
 
     async def test_malformed_json_auth_dropped(self) -> None:
         task, port, _ = await self._start(_make_server())
@@ -708,16 +722,8 @@ class StdioBridgeTest(unittest.IsolatedAsyncioTestCase):
         """Bridge authenticates, forwards stdin to TCP, exits on stdin EOF."""
         server = _make_server()
         token = secrets.token_hex(16)
-        port_holder: list[int] = []
 
-        tcp_task = asyncio.create_task(
-            serve_tcp(server, port=0, token=token, on_bound=port_holder.append)
-        )
-        for _ in range(40):
-            if port_holder:
-                break
-            await asyncio.sleep(0.025)
-        self.assertTrue(port_holder, "TCP server did not bind")
+        port, tcp_task = await serve_tcp(server, port=0, token=token)
 
         ping_msg = (
             json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n"
@@ -734,7 +740,7 @@ class StdioBridgeTest(unittest.IsolatedAsyncioTestCase):
                 mock_stdout.buffer = fake_stdout
                 # Bridge exits when stdin closes (b"" after ping_msg is consumed).
                 await asyncio.wait_for(
-                    run_stdio_bridge(port=port_holder[0], token=token),
+                    run_stdio_bridge(port=port, token=token),
                     timeout=5.0,
                 )
             # Give the event loop a cycle so any pending tcp_to_stdout writes land.
@@ -798,31 +804,23 @@ class RunMcpTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_reachable_port_calls_bridge(self) -> None:
         """A live TCP server causes run_mcp to bridge instead of going standalone."""
-        server = _make_server()
-        port_holder: list[int] = []
-        token = secrets.token_hex(16)
-        tcp_task = asyncio.create_task(
-            serve_tcp(server, port=0, token=token, on_bound=port_holder.append)
-        )
-        for _ in range(40):
-            if port_holder:
-                break
-            await asyncio.sleep(0.025)
-        self.assertTrue(port_holder, "TCP server did not bind")
-
         from unittest.mock import AsyncMock
+
+        server = _make_server()
+        token = secrets.token_hex(16)
+        port, tcp_task = await serve_tcp(server, port=0, token=token)
 
         bridge = AsyncMock()
         try:
             with patch("tinymcp.transport.run_stdio_bridge", bridge):
                 await run_mcp(
                     self._server(),
-                    remote_port=port_holder[0],
+                    remote_port=port,
                     remote_token=token,
                 )
             bridge.assert_awaited_once()
             _, kwargs = bridge.call_args
-            self.assertEqual(kwargs["port"], port_holder[0])
+            self.assertEqual(kwargs["port"], port)
             self.assertEqual(kwargs["token"], token)
         finally:
             tcp_task.cancel()
@@ -839,16 +837,7 @@ class RunMcpIntegrationTest(unittest.IsolatedAsyncioTestCase):
         """run_mcp probes a live TCP server and bridges stdin/stdout without mocking."""
         server = _make_server()
         token = secrets.token_hex(16)
-        port_holder: list[int] = []
-
-        tcp_task = asyncio.create_task(
-            serve_tcp(server, port=0, token=token, on_bound=port_holder.append)
-        )
-        for _ in range(40):
-            if port_holder:
-                break
-            await asyncio.sleep(0.025)
-        self.assertTrue(port_holder, "TCP server did not bind")
+        port, tcp_task = await serve_tcp(server, port=0, token=token)
 
         ping_msg = (
             json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode() + b"\n"
@@ -866,7 +855,7 @@ class RunMcpIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(
                     run_mcp(
                         McpServer("unused"),
-                        remote_port=port_holder[0],
+                        remote_port=port,
                         remote_token=token,
                     ),
                     timeout=5.0,
