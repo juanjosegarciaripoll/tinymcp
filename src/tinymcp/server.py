@@ -30,6 +30,7 @@ import inspect
 import json
 import logging
 import sys
+import threading
 import types as _types
 import typing
 from collections.abc import Callable
@@ -318,8 +319,19 @@ class McpServer:
         stdin_buf: IO[bytes] = stdin if stdin is not None else sys.stdin.buffer
         stdout_buf: IO[bytes] = stdout if stdout is not None else sys.stdout.buffer
 
+        line_queue: asyncio.Queue[bytes] = asyncio.Queue()
+
+        def _reader() -> None:
+            while True:
+                data = stdin_buf.readline()
+                loop.call_soon_threadsafe(line_queue.put_nowait, data)
+                if not data:
+                    break
+
+        threading.Thread(target=_reader, daemon=True).start()
+
         async def readline() -> bytes:
-            return await loop.run_in_executor(None, stdin_buf.readline)
+            return await line_queue.get()
 
         async def writeline(data: bytes) -> None:
             stdout_buf.write(data)

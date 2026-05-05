@@ -1,6 +1,6 @@
 """MCP transport helpers: TCP server, stdio bridge, stdio standalone.
 
-Four async entry points:
+Five async entry points:
 
 ``serve_tcp(server, *, host, port, token)``
     Accepts MCP connections on *host*:*port*.  Each client must send a JSON
@@ -8,10 +8,12 @@ Four async entry points:
     the wrong token or that time out are closed silently.  Returns
     ``(actual_port, task)``; cancel *task* to stop accepting.
 
-``run_mcp(server, *, remote_port, remote_token, on_unreachable)``
-    High-level entry point: probe *remote_port*, bridge if reachable, fall
-    back to standalone if not.  Callers read their own state files and pass
-    the discovered port + token; tinymcp owns the probe-and-decide logic.
+``probe(host, port, *, timeout)``
+    Return True if a TCP server is listening at *host*:*port*.
+
+``run_mcp(server, *, remote, on_unreachable)``
+    High-level entry point: probe *remote* (host, port, token), bridge if
+    reachable, fall back to standalone if not.
 
 ``run_stdio_bridge(*, host, port, token)``
     Connects to a running TCP server and forwards stdin/stdout to it.
@@ -30,6 +32,7 @@ import asyncio
 import json
 import logging
 import sys
+import threading
 from collections.abc import Callable
 
 from tinymcp.server import McpServer
@@ -76,6 +79,20 @@ async def serve_tcp(
     return actual_port, asyncio.create_task(_serve_forever())
 
 
+async def probe(host: str, port: int, *, timeout: float = CONNECT_TIMEOUT) -> bool:
+    """Return True if a TCP server is listening at *host*:*port*."""
+    try:
+        _r, _w = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout,
+        )
+        _w.close()
+        await _w.wait_closed()
+        return True
+    except (TimeoutError, ConnectionRefusedError, OSError):
+        return False
+
+
 async def run_stdio_bridge(*, host: str = LOOPBACK_HOST, port: int, token: str) -> None:
     """Forward stdin/stdout to the running TCP server.
 
@@ -90,10 +107,21 @@ async def run_stdio_bridge(*, host: str = LOOPBACK_HOST, port: int, token: str) 
     await writer.drain()
 
     loop = asyncio.get_running_loop()
+    stdin_buf = sys.stdin.buffer
+    line_queue: asyncio.Queue[bytes] = asyncio.Queue()
+
+    def _stdin_reader() -> None:
+        while True:
+            data = stdin_buf.readline()
+            loop.call_soon_threadsafe(line_queue.put_nowait, data)
+            if not data:
+                break
+
+    threading.Thread(target=_stdin_reader, daemon=True).start()
 
     async def stdin_to_tcp() -> None:
         while True:
-            line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
+            line = await line_queue.get()
             if not line:
                 break
             writer.write(line)
@@ -124,37 +152,24 @@ async def run_stdio_bridge(*, host: str = LOOPBACK_HOST, port: int, token: str) 
 async def run_mcp(
     server: McpServer,
     *,
-    remote_port: int | None = None,
-    remote_token: str | None = None,
+    remote: tuple[str, int, str] | None = None,
     on_unreachable: Callable[[], None] | None = None,
 ) -> None:
     """Run a full MCP session over stdin/stdout.
 
-    If *remote_port* and *remote_token* are both given, probes the port.
-    On success bridges stdin/stdout to the running TCP server.  If the port
-    is not reachable, calls *on_unreachable* (if provided — e.g. to remove a
-    stale state file) then falls back to a self-contained stdio session.
-
-    This is the standard entry point for a ``mcp`` subcommand that supports
-    both direct use and TUI bridge mode.  Callers read their own project-
-    specific state files and pass the discovered port + token; this function
-    owns the probe-and-decide logic shared by all consumers.
+    If *remote* is ``(host, port, token)``, probes the port.  On success
+    bridges stdin/stdout to the running TCP server.  If the port is not
+    reachable, calls *on_unreachable* (if provided) then falls back to a
+    self-contained stdio session.  When *remote* is ``None``, goes straight
+    to standalone mode without calling *on_unreachable*.
     """
-    if remote_port is not None and remote_token is not None:
-        try:
-            _r, _w = await asyncio.wait_for(
-                asyncio.open_connection(LOOPBACK_HOST, remote_port),
-                timeout=CONNECT_TIMEOUT,
-            )
-            _w.close()
-            await _w.wait_closed()
-            await run_stdio_bridge(
-                host=LOOPBACK_HOST, port=remote_port, token=remote_token
-            )
+    if remote is not None:
+        host, port, token = remote
+        if await probe(host, port):
+            await run_stdio_bridge(host=host, port=port, token=token)
             return
-        except (TimeoutError, ConnectionRefusedError, OSError):
-            if on_unreachable is not None:
-                on_unreachable()
+        if on_unreachable is not None:
+            on_unreachable()
     await run_stdio_standalone(server)
 
 
@@ -202,6 +217,7 @@ __all__ = [
     "AUTH_TIMEOUT",
     "CONNECT_TIMEOUT",
     "LOOPBACK_HOST",
+    "probe",
     "run_mcp",
     "run_stdio_bridge",
     "run_stdio_standalone",

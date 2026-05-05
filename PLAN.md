@@ -237,13 +237,13 @@ publish UPGRADE.md notes.
 
 ## Phase 7 — Breaking changes around `run_mcp` / stdio cancellation
 
-- [ ] **7.1** Split `run_mcp` into:
+- [x] **7.1** Split `run_mcp` into:
   - `probe(host, port, *, timeout=CONNECT_TIMEOUT) -> bool` (public),
   - `run_mcp(server, *, remote=None, on_unreachable=None)` where `remote`
     is `(host, port, token) | None`.
   Removes the `remote_port` / `remote_token` kwargs. **UPGRADE.md §4.**
 
-- [ ] **7.2** Replace `loop.run_in_executor(None, sys.stdin.buffer.readline)`
+- [x] **7.2** Replace `loop.run_in_executor(None, sys.stdin.buffer.readline)`
       in `_run_stdio` and `run_stdio_bridge` with a non-blocking stdin
       reader (selectors-based on POSIX, `msvcrt` or a managed thread with
       a sentinel on Windows). Required for clean cancellation; today the

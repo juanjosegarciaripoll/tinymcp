@@ -11,7 +11,7 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-from tinymcp import AUTH_TIMEOUT, McpServer, run_mcp, serve_tcp
+from tinymcp import AUTH_TIMEOUT, LOOPBACK_HOST, McpServer, probe, run_mcp, serve_tcp
 from tinymcp.transport import run_stdio_bridge
 
 # ---------------------------------------------------------------------------
@@ -795,8 +795,7 @@ class RunMcpTest(unittest.IsolatedAsyncioTestCase):
         with patch("tinymcp.transport.run_stdio_standalone", standalone):
             await run_mcp(
                 self._server(),
-                remote_port=19998,
-                remote_token="unused",
+                remote=(LOOPBACK_HOST, 19998, "unused"),
                 on_unreachable=cleanup,
             )
         self.assertTrue(cleanup_called)
@@ -815,8 +814,7 @@ class RunMcpTest(unittest.IsolatedAsyncioTestCase):
             with patch("tinymcp.transport.run_stdio_bridge", bridge):
                 await run_mcp(
                     self._server(),
-                    remote_port=port,
-                    remote_token=token,
+                    remote=(LOOPBACK_HOST, port, token),
                 )
             bridge.assert_awaited_once()
             _, kwargs = bridge.call_args
@@ -855,8 +853,7 @@ class RunMcpIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(
                     run_mcp(
                         McpServer("unused"),
-                        remote_port=port,
-                        remote_token=token,
+                        remote=(LOOPBACK_HOST, port, token),
                     ),
                     timeout=5.0,
                 )
@@ -867,3 +864,23 @@ class RunMcpIntegrationTest(unittest.IsolatedAsyncioTestCase):
         # Bridge ran cleanly (no exception, no timeout).
         # A response may or may not be captured due to the FIRST_COMPLETED
         # cancellation race (documented in PLAN.md 4.4).
+
+
+# ---------------------------------------------------------------------------
+# probe (7.1)
+# ---------------------------------------------------------------------------
+
+
+class ProbeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_probe_reachable_returns_true(self) -> None:
+        server = _make_server()
+        token = secrets.token_hex(16)
+        port, task = await serve_tcp(server, port=0, token=token)
+        try:
+            self.assertTrue(await probe(LOOPBACK_HOST, port))
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_probe_unreachable_returns_false(self) -> None:
+        self.assertFalse(await probe(LOOPBACK_HOST, 19997))
